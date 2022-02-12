@@ -1,0 +1,427 @@
+# Playbook: Provisionamento switch Huawei distribuicao
+# Autor: Montanaro Mendes
+
+- name: Provisionamento Switch Distribuicao
+  hosts: vrp
+  connection: network_cli
+  gather_facts: no
+  vars:
+    cli:
+      host: hosts
+      port: "{{ ansible_port }}"
+      username: "{{ ansible_user }}"
+      password: "{{ ansible_ssh_pass }}"
+      transport: cli
+
+  tasks:
+  - name: "Run initial setup - Hostname"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - sysname %hostname
+
+  - name: "Tacacs+ Configuration"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - hwtacacs-server template $template-name
+        - hwtacacs-server accounting $ip_tacacs_server
+        - hwtacacs-server authentication $ip_tacacs_server
+        - hwtacacs-server authorization $ip_tacacs_server
+        - hwtacacs-server shared-key cipher $pass_tacacs_server
+
+  - name: "AAA Configuration"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - aaa
+        - local-user $user_emergency assword irreversible-cipher $pass_user_emergency
+        - local-user $user_emergency privilege level 15
+        - local-user $user_emergency service-type terminal ssh
+        - authentication-scheme $scheme_authentication_name
+        - authentication-mode hwtacacs local
+        - quit
+        - authorization-scheme $scheme_authorization_name
+        - authorization-mode hwtacacs local
+        - quit
+        - accounting-scheme $scheme_accounting_name
+        - accounting-mode hwtacacs
+        - accounting realtime 3
+        - quit
+        - recording-scheme $scheme_recording_name
+        - recording-mode hwtacacs online
+        - quit
+        - domain $domin_name
+        - authentication-scheme $scheme_authentication_name
+        - authorization-scheme $scheme_authorization_name
+        - accounting-scheme $scheme_accounting_name
+        - hwtacacs-server $template-name
+        - quit
+        - quit
+        - domain $domin_name
+        - domain $domain admin
+
+  - name: "SSH Configuration"
+    community.network.ce_command:
+      commands:
+       - system-view
+       - stelnet server enable
+       - ssh user $user_emergency
+       - ssh user $user_emergency authentication-type password
+       - ssh user $user_emergency service-type all
+
+  - name: "NTP Configuration"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - ntp-service server disable
+        - ntp-service ipv6 server disable
+        - ntp-service unicast-server $server_ntp_local
+        - clock timezone UTC-3 minus 03:00:00
+
+  - name: "LOG Configuration"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - info-center loghost $ip_log_server source-ip %loopback_ip facility local6 port 5440
+        - info-center trapbuffer size 1024
+        - info-center timestamp debugging format-date without-timezone
+        - info-center timestamp log date without-timezone
+        - info-center timestamp trap format-date without-timezone
+
+  - name: "ACL Configuration"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - acl 2000
+        - rule permit source $ip_access 0
+        - quit
+        - ssh server acl 2000
+
+  - name: "VTY SSH"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - user-interface vty 0 4
+        - protocol inbound ssh
+        - authentication-mode aaa
+        - acl 2000 inbound
+
+  - name: "Protection Console"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - user-interface console 0
+        - authentication-mode password
+        - set authentication password cipher $pass_console
+
+  - name: "Gerencia entre switches"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - ssh client first-time enable
+
+  - name: "SNMP"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - snmp-agent
+        - snmp-agent community read cipher $community_snmp
+        - snmp-agent sys-info contact noc@example.net.br
+        - snmp-agent sys-info location pop.empresa.uf.cidade
+        - snmp-agent sys-info version v2c v3
+  
+  - name: "SNMP PORT UDP"
+    cli_command:
+      command: snmp-agent udp-port 1026
+      prompt: "Continue?"
+      answer: "y"
+
+  - name: "backup"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - set save-configuration interval 1440
+        - set save-configuration backup-to-server server $ip_ftp_server transport-type ftp user $user_ftp password $pass_ftp path $caminho_diretorio_ftp
+        - quit
+
+  - name: "Configuracao MPLS"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - mpls lsr-id $loopback_ip
+        - mpls
+        - mpls te
+        - mpls rsvp-te
+        - mpls rsvp-te hello
+        - quit
+        - mpls ldp
+        - quit
+
+  - name: "Configuracao OSPF"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - ospf 1 router-id $loopback_ip
+        - bfd all-interfaces enable
+        - bfd all-interfaces min-tx-interval 300 min-rx-interval 300
+        - spf-schedule-interval millisecond 10
+        - lsa-originate-interval 0
+        - lsa-arrival-interval 0
+        - opaque-capability enable
+        - enable log config
+        - enable log state
+        - enable log error
+        - graceful-restart
+        - bandwidth-reference 400000
+        - enable traffic-adjustment
+        - flooding-control
+        - frr
+         - loop-free-alternate
+         -quit
+        - area 0
+        - network $loopback_ip 0.0.0.0
+        - network $ip_p2p_ospf 0.0.0.3
+        - mpls-te enable
+        - quit
+        - quit
+        - bfd
+
+  - name: "Configuracao das vlans L2"
+    community.network.ce_command:
+      commands:
+       - system-view
+       - vlan 911
+       - description $exemple
+       - quit
+
+  - name: "Configuracao das interface vlan L3"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - interface Vlanif 911
+        - description $exemple
+        - ip address 10.249.148.25 30
+        - ospf network-type p2p
+        - ospf timer hello 5
+        - ospf timer dead 10
+
+  - name: "Configuracao das interfaces Eth-Trunk"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - interface Eth-trunk0
+        - undo portswitch
+        - description $exemple
+        - mtu 9000
+        - ip address 10.249.148.105 255.255.255.252
+        - ospf mtu-enable
+        - ospf network-type p2p
+        - ospf bfd enable
+        - ospf bfd min-tx-interval 500 min-rx-interval 500 detect-multiplier 9
+        - mpls
+        - mpls te
+        - mpls te bandwidth change thresholds down 1
+        - mpls te bandwidth max-reservable-bandwidth 8388608
+        - mpls te bandwidth bc0 8388608
+        - mpls rsvp-te
+        - mpls rsvp-te hello
+        - mpls ldp
+        - mpls ldp transport-address LoopBack0
+        - undo local-preference enable
+        - quit
+        - interface xgi 0/0/3
+        - eth-trunk 0
+        - description $exemple
+        - quit
+
+  - name: "Configuracao das interfaces Fisicas"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - interface gi0/0/2
+        - description $exemple
+        - port link-type trunk
+        - port trunk allow-pass vlan 911
+        - quit
+        - interface lo0
+        - ip address $loopback_ip
+        - quit
+
+#INICIO CONFIGURAÇÃO BGP
+
+  - name: "Configuracao BGP"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - bgp $asnumber
+        - router-id $loopback_ip
+        - group RR internal
+
+  - name: "Configuracao AS Community and AS-PATH"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - ip as-path-filter 32 permit .*
+        - ip community-filter basic CLIENTS permit 65534:1010
+        - ip community-filter basic MANAGEMENT permit 65534:1019
+
+  - name: "Configuracao PrefixList"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - ip ip-prefix AS0000_24 index 5 permit 192.168.0.0 19 greater-equal 19 less-equal 24
+        - ip ipv6-prefix ASN20000_128 index 5 permit 2804:ec00:0:0:0:0:0:0 32 greater-equal 49 less-equal 128
+
+  - name: "Configuracao Route-Policy"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - route-policy OUT-IPV4-RR permit node 50
+        - if-match community-filter CLIENTS
+        - quit
+        - route-policy OUT-IPV4-RR permit node 100
+        - if-match community-filter MANAGEMENT
+        - quit
+        - route-policy OUT-IPV6-RR permit node 50
+        - if-match community-filter MANAGEMENT
+        - apply mpls-label
+        - quit
+        - route-policy OUT-IPV6-RR permit node 100
+        - if-match community-filter MANAGEMENT
+        - apply mpls-label
+        - quit
+        - route-policy OUT-DEFAULT permit node 50
+        - if-match ip-prefix AS263327_24
+        - apply local-preference 1000
+        - apply community 65534:1010
+        - quit
+        - route-policy OUT-DEFAULT permit node 100
+        - if-match ip-prefix AS263327_32
+        - apply local-preference 1000
+        - apply community 65534:1019
+        - quit
+        - route-policy OUT-DEFAULT-V6 permit node 50
+        - if-match ipv6 address prefix-list ASN263327_48
+        - apply local-preference 1000
+        - apply community 65534:1010
+        - quit
+        - route-policy OUT-DEFAULT-V6 permit node 100
+        - if-match ipv6 address prefix-list ASN263327_128
+        - apply local-preference 1000
+        - apply community 65534:1019
+        - quit
+        - route-policy IN-VPNV4-RR permit node 10000
+        - quit
+        - route-policy OUT-VPNV4-RR permit node 10000
+        - quit
+        - route-policy IN-VPNV4-RR permit node 10000 
+        - quit                                     
+        - route-policy OUT-VPNV4-RR permit node 10000
+        - quit
+        - route-policy IN-IPV4-RR permit node 10000
+        - quit
+        - route-policy OUT-IPV4-RR deny node 10000
+        - quit
+        - route-policy IN-IPV6-RR permit node 10000
+        - quit
+        - route-policy OUT-IPV6-RR deny node 10000
+        - quit
+
+  - name: "Configuracao Ativando os Peering"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - bgp $asnumber
+        - peer 10.165.240.0 group RR
+        - peer 10.165.240.1 group RR
+        - peer 10.165.240.2 group RR
+        - peer 10.165.240.3 group RR
+        - peer RR connect-interface LoopBack 0
+
+  - name: "Configuracao Ativando ipv4-family unicast"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - bgp 263327
+        - ipv4-family unicast
+        - undo synchronization
+        - ext-community-change enable
+        - preference 20 200 200
+        - import-route direct route-policy OUT-DEFAULT
+        - import-route static route-policy OUT-DEFAULT
+        - peer RR enable
+        - peer RR route-policy IN-IPV4-RR import
+        - peer RR route-policy OUT-IPV4-RR export
+        - peer RR next-hop-local
+        - peer RR advertise-community
+        - peer 10.165.240.0 group RR
+        - peer 10.165.240.0 enable
+        - peer 10.165.240.1 group RR
+        - peer 10.165.240.1 enable
+        - peer 10.165.240.2 group RR
+        - peer 10.165.240.2 enable
+        - peer 10.165.240.3 group RR
+        - peer 10.165.240.3 enable
+
+  - name: "Configuracao Ativando ipv6-family unicast"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - bgp 263327
+        - ipv6-family unicast
+        - undo synchronization
+        - ext-community-change enable
+        - preference 20 200 200
+        - import-route direct route-policy OUT-DEFAULT-V6
+        - import-route static route-policy OUT-DEFAULT-V6
+        - peer RR enable
+        - peer RR route-policy IN-IPV6-RR import  
+        - peer RR route-policy OUT-IPV6-RR export
+        - peer RR next-hop-local
+        - peer RR advertise-community
+        - peer 10.165.240.0 group RR
+        - peer 10.165.240.0 enable
+        - peer 10.165.240.0 label-route-capability
+        - peer 10.165.240.1 group RR
+        - peer 10.165.240.1 enable
+        - peer 10.165.240.1 label-route-capability
+        - peer 10.165.240.2 group RR
+        - peer 10.165.240.2 enable
+        - peer 10.165.240.2 label-route-capability
+        - peer 10.165.240.3 enable
+        - peer 10.165.240.3 label-route-capability
+
+  - name: "Configuracao Ativando ipv4-family vpnv4"
+    community.network.ce_command:
+      commands:
+        - system-view
+        - bgp 263327
+        - ipv4-family vpnv4
+        - undo policy vpn-target
+        - peer RR enable 
+        - peer RR route-policy IN-VPNV4-RR import
+        - peer RR route-policy OUT-VPNV4-RR export
+        - peer RR next-hop-local
+        - peer RR advertise-community
+        - peer 10.165.240.0 group RR
+        - peer 10.165.240.0 enable
+        - peer 10.165.240.1 group RR
+        - peer 10.165.240.1 enable
+        - peer 10.165.240.2 group RR
+        - peer 10.165.240.2 enable
+        - peer 10.165.240.3 group RR
+        - peer 10.165.240.3 enable
+
+  - name: "Salvar"
+    cli_command: 
+      command: save $hostname
+      prompt: "continue?"
+      answer: "y"
+
+  
+  - name: "STARTUP"
+    community.network.ce_command: 
+      commands:
+        - startup saved-configuration flash:/$hostname.zip
+    
